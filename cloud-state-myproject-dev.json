@@ -2,7 +2,7 @@
   "project": "myproject",
   "environment": "dev",
   "region": "ap-south-1",
-  "last_updated": "2026-01-14T16:25:00+05:30",
+  "last_updated": "2026-01-14T17:46:34+05:30",
   "vpc": {},
   "s3": {},
   "ecr": {},

@@ -3,7 +3,6 @@
 set -euo pipefail
 
 source utilities.sh
-
 if [[ -z "${PROJECT_NAME:-}" ]]; then
     if [[ -f "variables.sh" ]]; then
         source variables.sh
@@ -23,12 +22,9 @@ declare -a EIP_ALLOCATION_IDS=()
 PUBLIC_ROUTE_TABLE_ID=""
 declare -a PRIVATE_ROUTE_TABLE_IDS=()
 
-# Unified state file
+
 STATE_FILE="cloud-state-${PROJECT_NAME}-${ENVIRONMENT}.json"
-
-
-
-save_state() {
+function save_state() {
     local public_subnets_json=""
     if [[ ${#PUBLIC_SUBNET_IDS[@]} -gt 0 ]]; then
         public_subnets_json=$(printf '"%s",' "${PUBLIC_SUBNET_IDS[@]}" | sed 's/,$//')
@@ -54,13 +50,11 @@ save_state() {
         private_rts_json=$(printf '"%s",' "${PRIVATE_ROUTE_TABLE_IDS[@]}" | sed 's/,$//')
     fi
     
-    # Read existing state or create new
     local existing_state="{}"
     if [[ -f "$STATE_FILE" ]]; then
         existing_state=$(cat "$STATE_FILE")
     fi
-    
-    # Update VPC section in state
+
     cat > "$STATE_FILE" <<EOF
 {
   "project": "${PROJECT_NAME}",
@@ -142,15 +136,12 @@ cleanup_on_error() {
     error "Rollback completed. Check logs for details: $LOG_FILE"
     exit 1
 }
-
-# Set trap for cleanup
 trap cleanup_on_error ERR
 
 
-check_prerequisites() {
+function check_prerequisites() {
     section "CHECKING PREREQUISITES"
-    
-    # Check AWS CLI
+
     if ! command -v aws &> /dev/null; then
         error "AWS CLI is not installed"
         exit 1
@@ -162,22 +153,19 @@ check_prerequisites() {
         exit 1
     fi
     success "AWS credentials are valid"
-    
-    # Get AWS Account ID if not set
+
     if [[ -z "${AWS_ACCOUNT_ID:-}" ]]; then
         AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text --region "$AWS_REGION")
         export AWS_ACCOUNT_ID
         log "AWS Account ID: $AWS_ACCOUNT_ID"
     fi
-    
-    # Check if jq is available (optional but helpful)
+
     if command -v jq &> /dev/null; then
         success "jq is available for JSON parsing"
     else
         warning "jq not found - JSON parsing will use basic methods"
     fi
     
-    # Validate required variables
     local required_vars=(
         "AWS_REGION"
         "PROJECT_NAME"
@@ -195,13 +183,11 @@ check_prerequisites() {
         fi
     done
     success "All required variables are set"
-    
-    # Parse arrays
+
     IFS=',' read -ra AZ_ARRAY <<< "$AVAILABILITY_ZONES"
     IFS=',' read -ra PUBLIC_CIDRS <<< "$PUBLIC_SUBNET_CIDRS"
     IFS=',' read -ra PRIVATE_CIDRS <<< "$PRIVATE_SUBNET_CIDRS"
-    
-    # Validate array lengths match
+
     if [[ ${#PUBLIC_CIDRS[@]} != ${#AZ_ARRAY[@]} ]]; then
         error "Number of public subnet CIDRs (${#PUBLIC_CIDRS[@]}) must match availability zones (${#AZ_ARRAY[@]})"
         exit 1
@@ -215,11 +201,8 @@ check_prerequisites() {
     success "Configuration validation passed"
 }
 
-################################################################################
-# VPC CREATION FUNCTIONS
-################################################################################
 
-check_existing_vpc() {
+function check_existing_vpc() {
     section "CHECKING FOR EXISTING VPC"
     
     local vpc_name="${PROJECT_NAME}-${ENVIRONMENT}-vpc"
@@ -244,46 +227,40 @@ check_existing_vpc() {
     log "No existing VPC found. Will create new VPC."
 }
 
-load_existing_vpc_resources() {
+function load_existing_vpc_resources() {
     log "Loading existing VPC resources..."
-    
-    # Load Internet Gateway
+
     IGW_ID=$(aws ec2 describe-internet-gateways --filters "Name=attachment.vpc-id,Values=$VPC_ID" --region "$AWS_REGION" --query 'InternetGateways[0].InternetGatewayId' --output text 2>/dev/null || echo "")
+    local public_subnet_ids=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" "Name=tag:Type,Values=public" --region "$AWS_REGION" --query 'Subnets[].SubnetId' --output text 2>/dev/null || echo "")
+    local private_subnet_ids=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" "Name=tag:Type,Values=private" --region "$AWS_REGION" --query 'Subnets[].SubnetId' --output text 2>/dev/null || echo "")
+    local nat_gateway_ids=$(aws ec2 describe-nat-gateways --filter "Name=vpc-id,Values=$VPC_ID" "Name=state,Values=available" --region "$AWS_REGION" --query 'NatGateways[].NatGatewayId' --output text 2>/dev/null || echo "")
+    PUBLIC_ROUTE_TABLE_ID=$(aws ec2 describe-route-tables --filters "Name=vpc-id,Values=$VPC_ID" "Name=tag:Type,Values=public" --region "$AWS_REGION" --query 'RouteTables[0].RouteTableId' --output text 2>/dev/null || echo "")
+    local private_rt_ids=$(aws ec2 describe-route-tables --filters "Name=vpc-id,Values=$VPC_ID" "Name=tag:Type,Values=private" --region "$AWS_REGION" --query 'RouteTables[].RouteTableId' --output text 2>/dev/null || echo "")
     
     if [[ -n "$IGW_ID" && "$IGW_ID" != "None" ]]; then
         log "Found Internet Gateway: $IGW_ID"
     else
         warning "No Internet Gateway found for VPC"
     fi
-    
-    # Load Public Subnets
-    local public_subnet_ids=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" "Name=tag:Type,Values=public" --region "$AWS_REGION" --query 'Subnets[].SubnetId' --output text 2>/dev/null || echo "")
-    
+
     if [[ -n "$public_subnet_ids" ]]; then
         read -ra PUBLIC_SUBNET_IDS <<< "$public_subnet_ids"
         log "Found ${#PUBLIC_SUBNET_IDS[@]} public subnet(s)"
     else
         warning "No public subnets found"
     fi
-    
-    # Load Private Subnets
-    local private_subnet_ids=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" "Name=tag:Type,Values=private" --region "$AWS_REGION" --query 'Subnets[].SubnetId' --output text 2>/dev/null || echo "")
-    
+
     if [[ -n "$private_subnet_ids" ]]; then
         read -ra PRIVATE_SUBNET_IDS <<< "$private_subnet_ids"
         log "Found ${#PRIVATE_SUBNET_IDS[@]} private subnet(s)"
     else
         warning "No private subnets found"
     fi
-    
-    # Load NAT Gateways
-    local nat_gateway_ids=$(aws ec2 describe-nat-gateways --filter "Name=vpc-id,Values=$VPC_ID" "Name=state,Values=available" --region "$AWS_REGION" --query 'NatGateways[].NatGatewayId' --output text 2>/dev/null || echo "")
-    
+
     if [[ -n "$nat_gateway_ids" ]]; then
         read -ra NAT_GATEWAY_IDS <<< "$nat_gateway_ids"
         log "Found ${#NAT_GATEWAY_IDS[@]} NAT Gateway(s)"
-        
-        # Load EIP allocations for NAT Gateways
+
         for nat_id in "${NAT_GATEWAY_IDS[@]}"; do
             local eip_id=$(aws ec2 describe-nat-gateways --nat-gateway-ids "$nat_id" --region "$AWS_REGION" --query 'NatGateways[0].NatGatewayAddresses[0].AllocationId' --output text 2>/dev/null || echo "")
             if [[ -n "$eip_id" && "$eip_id" != "None" ]]; then
@@ -293,38 +270,28 @@ load_existing_vpc_resources() {
     else
         warning "No NAT Gateways found"
     fi
-    
-    # Load Public Route Table
-    PUBLIC_ROUTE_TABLE_ID=$(aws ec2 describe-route-tables --filters "Name=vpc-id,Values=$VPC_ID" "Name=tag:Type,Values=public" --region "$AWS_REGION" --query 'RouteTables[0].RouteTableId' --output text 2>/dev/null || echo "")
-    
+
     if [[ -n "$PUBLIC_ROUTE_TABLE_ID" && "$PUBLIC_ROUTE_TABLE_ID" != "None" ]]; then
         log "Found public route table: $PUBLIC_ROUTE_TABLE_ID"
     else
         warning "No public route table found"
     fi
-    
-    # Load Private Route Tables
-    local private_rt_ids=$(aws ec2 describe-route-tables --filters "Name=vpc-id,Values=$VPC_ID" "Name=tag:Type,Values=private" --region "$AWS_REGION" --query 'RouteTables[].RouteTableId' --output text 2>/dev/null || echo "")
-    
+
     if [[ -n "$private_rt_ids" ]]; then
         read -ra PRIVATE_ROUTE_TABLE_IDS <<< "$private_rt_ids"
         log "Found ${#PRIVATE_ROUTE_TABLE_IDS[@]} private route table(s)"
     else
         warning "No private route tables found"
     fi
-    
-    # Save state with loaded resources
     save_state
     
     success "Loaded existing VPC resources"
 }
 
-complete_missing_resources() {
+function complete_missing_resources() {
     section "COMPLETING MISSING RESOURCES"
     
     local needs_creation=false
-    
-    # Check what's missing
     if [[ -z "$IGW_ID" ]]; then
         warning "Internet Gateway is missing"
         needs_creation=true
@@ -348,23 +315,19 @@ complete_missing_resources() {
         
         if [[ $REPLY =~ ^[Yy][Ee][Ss]$ ]]; then
             log "Creating missing resources..."
-            
-            # Create IGW if missing
+
             if [[ -z "$IGW_ID" ]]; then
                 create_internet_gateway
             fi
-            
-            # Create subnets if missing
+
             if [[ ${#PUBLIC_SUBNET_IDS[@]} -eq 0 ]] || [[ ${#PRIVATE_SUBNET_IDS[@]} -eq 0 ]]; then
                 create_subnets
             fi
-            
-            # Create NAT gateways if needed and missing
+
             if [[ "${ENABLE_NAT_GATEWAY}" == "true" ]] && [[ ${#NAT_GATEWAY_IDS[@]} -eq 0 ]]; then
                 create_nat_gateways
             fi
-            
-            # Create route tables if missing
+
             if [[ -z "$PUBLIC_ROUTE_TABLE_ID" ]] || [[ ${#PRIVATE_ROUTE_TABLE_IDS[@]} -eq 0 ]]; then
                 create_route_tables
             fi
@@ -401,26 +364,21 @@ create_vpc() {
     
     success "VPC created: $VPC_ID"
     save_state
-    
-    # Wait for VPC to be available
+
     log "Waiting for VPC to become available..."
     aws ec2 wait vpc-available --vpc-ids "$VPC_ID" --region "$AWS_REGION" 2>> "$LOG_FILE" || true
-    
-    # Enable DNS support
+
     log "Enabling DNS support..."
     aws ec2 modify-vpc-attribute --vpc-id "$VPC_ID" --enable-dns-support --region "$AWS_REGION" 2>> "$LOG_FILE"
-    
-    # Enable DNS hostnames
+
     log "Enabling DNS hostnames..."
     aws ec2 modify-vpc-attribute --vpc-id "$VPC_ID" --enable-dns-hostnames --region "$AWS_REGION" 2>> "$LOG_FILE"
     
     success "VPC DNS settings configured"
-    
-    # Add Name tag separately for better visibility
     aws ec2 create-tags --resources "$VPC_ID" --tags "Key=Name,Value=$vpc_name" --region "$AWS_REGION" 2>> "$LOG_FILE" || true
 }
 
-create_internet_gateway() {
+function create_internet_gateway() {
     section "CREATING INTERNET GATEWAY"
     
     local igw_name="${PROJECT_NAME}-${ENVIRONMENT}-igw"
@@ -441,8 +399,7 @@ create_internet_gateway() {
     
     success "Internet Gateway created: $IGW_ID"
     save_state
-    
-    # Attach to VPC with retry logic
+
     log "Attaching Internet Gateway to VPC..."
     local max_retries=3
     local retry_count=0
@@ -464,7 +421,7 @@ create_internet_gateway() {
     exit 1
 }
 
-create_subnets() {
+function create_subnets() {
     section "CREATING SUBNETS"
     
     IFS=',' read -ra AZ_ARRAY <<< "$AVAILABILITY_ZONES"
@@ -477,8 +434,7 @@ create_subnets() {
         local az="${AZ_ARRAY[$i]}"
         local public_cidr="${PUBLIC_CIDRS[$i]}"
         local private_cidr="${PRIVATE_CIDRS[$i]}"
-        
-        # Create public subnet
+
         log "Creating public subnet in $az with CIDR $public_cidr..."
         
         local public_subnet_id=$(aws ec2 create-subnet --vpc-id "$VPC_ID" --cidr-block "$public_cidr" --availability-zone "$az" --region "$AWS_REGION" \
@@ -498,12 +454,10 @@ create_subnets() {
         
         PUBLIC_SUBNET_IDS+=("$public_subnet_id")
         success "Public subnet created in $az: $public_subnet_id"
-        
-        # Enable auto-assign public IP
+
         log "Enabling auto-assign public IP for $public_subnet_id..."
         aws ec2 modify-subnet-attribute --subnet-id "$public_subnet_id" --map-public-ip-on-launch --region "$AWS_REGION" 2>> "$LOG_FILE"
-        
-        # Create private subnet
+
         log "Creating private subnet in $az with CIDR $private_cidr..."
         
         local private_subnet_id=$(aws ec2 create-subnet --vpc-id "$VPC_ID" --cidr-block "$private_cidr" --availability-zone "$az" --region "$AWS_REGION" \
@@ -530,7 +484,7 @@ create_subnets() {
     success "Created ${#PUBLIC_SUBNET_IDS[@]} public and ${#PRIVATE_SUBNET_IDS[@]} private subnets"
 }
 
-create_nat_gateways() {
+function create_nat_gateways() {
     section "CREATING NAT GATEWAYS"
     
     if [[ "${ENABLE_NAT_GATEWAY}" != "true" ]]; then
@@ -548,8 +502,7 @@ create_nat_gateways() {
     
     for i in $(seq 0 $((nat_count - 1))); do
         local subnet_id="${PUBLIC_SUBNET_IDS[$i]}"
-        
-        # Allocate Elastic IP
+
         log "Allocating Elastic IP for NAT Gateway $((i + 1))/$nat_count..."
         
         local eip_alloc_id=$(aws ec2 allocate-address --domain vpc --region "$AWS_REGION" \
@@ -566,8 +519,7 @@ create_nat_gateways() {
         
         EIP_ALLOCATION_IDS+=("$eip_alloc_id")
         success "Elastic IP allocated: $eip_alloc_id"
-        
-        # Create NAT Gateway
+
         log "Creating NAT Gateway in subnet $subnet_id..."
         
         local nat_gw_id=$(aws ec2 create-nat-gateway --subnet-id "$subnet_id" --allocation-id "$eip_alloc_id" --region "$AWS_REGION" \
@@ -587,8 +539,6 @@ create_nat_gateways() {
         
         save_state
     done
-    
-    # Wait for NAT Gateways to become available
     log "Waiting for NAT Gateway(s) to become available (this may take 3-5 minutes)..."
     
     for nat_gw_id in "${NAT_GATEWAY_IDS[@]}"; do
@@ -621,10 +571,8 @@ create_nat_gateways() {
     success "All NAT Gateways are available"
 }
 
-create_route_tables() {
+function create_route_tables() {
     section "CREATING ROUTE TABLES"
-    
-    # Create public route table
     log "Creating public route table..."
     
     PUBLIC_ROUTE_TABLE_ID=$(aws ec2 create-route-table --vpc-id "$VPC_ID" --region "$AWS_REGION" \
@@ -642,24 +590,18 @@ create_route_tables() {
     
     success "Public route table created: $PUBLIC_ROUTE_TABLE_ID"
     save_state
-    
-    # Add route to Internet Gateway
+
     log "Adding route to Internet Gateway..."
     
     aws ec2 create-route --route-table-id "$PUBLIC_ROUTE_TABLE_ID" --destination-cidr-block 0.0.0.0/0 --gateway-id "$IGW_ID" --region "$AWS_REGION" 2>> "$LOG_FILE"
-    
     success "Route to IGW added to public route table"
-    
-    # Associate public subnets with public route table
     log "Associating public subnets with public route table..."
     
     for subnet_id in "${PUBLIC_SUBNET_IDS[@]}"; do
         aws ec2 associate-route-table --subnet-id "$subnet_id" --route-table-id "$PUBLIC_ROUTE_TABLE_ID" --region "$AWS_REGION" 2>> "$LOG_FILE"
-        
         success "Public subnet $subnet_id associated with public route table"
     done
-    
-    # Create private route tables
+
     if [[ "${ENABLE_NAT_GATEWAY}" == "true" ]]; then
         local num_private_rts=${#PRIVATE_SUBNET_IDS[@]}
         
@@ -688,8 +630,7 @@ create_route_tables() {
             
             PRIVATE_ROUTE_TABLE_IDS+=("$private_rt_id")
             success "Private route table created: $private_rt_id"
-            
-            # Add route to NAT Gateway
+
             local nat_index=$i
             if [[ "${SINGLE_NAT_GATEWAY}" == "true" ]]; then
                 nat_index=0
@@ -698,14 +639,10 @@ create_route_tables() {
             local nat_gw_id="${NAT_GATEWAY_IDS[$nat_index]}"
             
             log "Adding route to NAT Gateway $nat_gw_id..."
-            
             aws ec2 create-route --route-table-id "$private_rt_id" --destination-cidr-block 0.0.0.0/0 --nat-gateway-id "$nat_gw_id" --region "$AWS_REGION" 2>> "$LOG_FILE"
-            
             success "Route to NAT Gateway added"
             save_state
         done
-        
-        # Associate private subnets with private route tables
         log "Associating private subnets with private route tables..."
         
         for i in "${!PRIVATE_SUBNET_IDS[@]}"; do
@@ -729,11 +666,7 @@ create_route_tables() {
     success "All route tables created and associated"
 }
 
-################################################################################
-# VPC ENDPOINTS (Optional but recommended)
-################################################################################
-
-create_vpc_endpoints() {
+function create_vpc_endpoints() {
     section "CREATING VPC ENDPOINTS (OPTIONAL)"
     
     if [[ "${CREATE_VPC_ENDPOINTS:-false}" != "true" ]]; then
@@ -742,8 +675,6 @@ create_vpc_endpoints() {
     fi
     
     log "Creating VPC endpoints for cost optimization..."
-    
-    # S3 Gateway Endpoint (free)
     log "Creating S3 gateway endpoint..."
     
     local s3_endpoint=$(aws ec2 create-vpc-endpoint --vpc-id "$VPC_ID" --service-name "com.amazonaws.${AWS_REGION}.s3" --route-table-ids "${PRIVATE_ROUTE_TABLE_IDS[@]}" "$PUBLIC_ROUTE_TABLE_ID" --region "$AWS_REGION" \
@@ -758,12 +689,9 @@ create_vpc_endpoints() {
     else
         warning "Failed to create S3 endpoint (non-critical)"
     fi
-    
-    # ECR API and DKR Endpoints (interface endpoints - have cost)
+
     if [[ "${CREATE_ECR_ENDPOINTS:-false}" == "true" ]]; then
         log "Creating ECR interface endpoints..."
-        
-        # Create security group for VPC endpoints
         local sg_id=$(aws ec2 create-security-group --group-name "${PROJECT_NAME}-${ENVIRONMENT}-vpce-sg" --description "Security group for VPC endpoints" --vpc-id "$VPC_ID" --region "$AWS_REGION" \
             --tag-specifications "ResourceType=security-group,Tags=[
                 {Key=Name,Value=${PROJECT_NAME}-${ENVIRONMENT}-vpce-sg},
@@ -771,21 +699,16 @@ create_vpc_endpoints() {
             ]" --query 'GroupId' --output text 2>> "$LOG_FILE" || echo "")
         
         if [[ -n "$sg_id" ]]; then
-            # Allow HTTPS from VPC
             aws ec2 authorize-security-group-ingress --group-id "$sg_id" --protocol tcp --port 443 --cidr "$VPC_CIDR" --region "$AWS_REGION" 2>> "$LOG_FILE" || true
-            
             success "VPC endpoint security group created: $sg_id"
         fi
     fi
 }
 
-################################################################################
-# VALIDATION AND OUTPUT
-################################################################################
 
-validate_vpc_creation() {
+function validate_vpc_creation() {
     section "VALIDATING VPC CREATION"
-    
+
     log "Verifying VPC exists..."
     local vpc_state=$(aws ec2 describe-vpcs --vpc-ids "$VPC_ID" --region "$AWS_REGION" --query 'Vpcs[0].State' --output text 2>> "$LOG_FILE")
     
@@ -823,7 +746,7 @@ validate_vpc_creation() {
     success "VPC validation completed"
 }
 
-print_vpc_summary() {
+function print_vpc_summary() {
     section "VPC CREATION SUMMARY"
     
     echo ""
@@ -882,8 +805,7 @@ print_vpc_summary() {
     echo ""
     echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
     echo ""
-    
-    # Export variables for use by other scripts
+
     cat > "vpc-exports.sh" <<EOF
 #!/bin/bash
 # VPC Exports - Source this file to use VPC resources in other scripts
@@ -900,7 +822,7 @@ EOF
 }
 
 
-main() {
+function main() {
     log "Starting VPC creation process..."
     log "Project: $PROJECT_NAME | Environment: $ENVIRONMENT | Region: $AWS_REGION"
     
@@ -922,7 +844,6 @@ main() {
     success "VPC creation completed successfully!"
 }
 
-# Run main if script is executed directly
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     main "$@"
 fi

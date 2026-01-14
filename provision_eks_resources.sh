@@ -1,16 +1,8 @@
 #!/usr/bin/env bash
 
-################################################################################
-# EKS Cluster Creation Module - Basic Example
-# Creates a simple EKS cluster with managed node group
-# Version: 1.0
-################################################################################
-
 set -euo pipefail
 
 source utilities.sh
-
-# Source variables if not already loaded
 if [[ -z "${PROJECT_NAME:-}" ]]; then
     if [[ -f "variables.sh" ]]; then
         source variables.sh
@@ -20,40 +12,19 @@ if [[ -z "${PROJECT_NAME:-}" ]]; then
     fi
 fi
 
-# EKS Resource Variables
 EKS_CLUSTER_NAME=""
 EKS_CLUSTER_ARN=""
 EKS_CLUSTER_ENDPOINT=""
 EKS_SERVICE_ROLE_ARN=""
 NODE_GROUP_NAME=""
 
-# Unified state file
+
 STATE_FILE="cloud-state-${PROJECT_NAME}-${ENVIRONMENT}.json"
 
-################################################################################
-# COLOR CODES
-################################################################################
-
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-MAGENTA='\033[0;35m'
-NC='\033[0m'
-
-################################################################################
-# STATE MANAGEMENT
-################################################################################
-
-save_state() {
-    # Read existing state or create new
+function save_state() {
     local existing_state="{}"
-    if [[ -f "$STATE_FILE" ]]; then
-        existing_state=$(cat "$STATE_FILE")
-    fi
-    
-    # Update EKS section in state
+    [[ -f "$STATE_FILE" ]] && existing_state=$(cat "$STATE_FILE")
+
     cat > "$STATE_FILE" <<EOF
 {
   "project": "${PROJECT_NAME}",
@@ -75,22 +46,17 @@ EOF
     log "State saved to $STATE_FILE"
 }
 
-################################################################################
-# PREREQUISITE CHECKS
-################################################################################
 
-check_prerequisites() {
+function check_prerequisites() {
     section "CHECKING PREREQUISITES"
-    
-    # Check AWS CLI
+
     if command -v aws &> /dev/null; then
         success "AWS CLI is installed"
     else
         error "AWS CLI is not installed"
         exit 1
     fi
-    
-    # Check AWS credentials
+
     if aws sts get-caller-identity --region "$AWS_REGION" &> /dev/null; then
         success "AWS credentials are valid"
         AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
@@ -99,8 +65,7 @@ check_prerequisites() {
         error "AWS credentials are invalid or not configured"
         exit 1
     fi
-    
-    # Check if VPC exists
+
     if [[ -f "vpc-exports.sh" ]]; then
         source vpc-exports.sh
         success "VPC configuration loaded"
@@ -113,26 +78,18 @@ check_prerequisites() {
     success "Configuration validation passed"
 }
 
-################################################################################
-# CREATE IAM ROLES
-################################################################################
-
-create_eks_service_role() {
+function create_eks_service_role() {
     section "CREATING EKS SERVICE ROLE"
-    
     local role_name="${PROJECT_NAME}-${ENVIRONMENT}-eks-cluster-role"
     
-    # Check if role already exists
     if aws iam get-role --role-name "$role_name" &>/dev/null; then
         log "IAM role already exists: $role_name"
         EKS_SERVICE_ROLE_ARN=$(aws iam get-role --role-name "$role_name" --query 'Role.Arn' --output text)
         log "Role ARN: $EKS_SERVICE_ROLE_ARN"
         return 0
-    fi
-    
+    fi    
     log "Creating EKS service role: $role_name"
-    
-    # Trust policy for EKS
+
     local trust_policy='{
         "Version": "2012-10-17",
         "Statement": [{
@@ -143,43 +100,25 @@ create_eks_service_role() {
             "Action": "sts:AssumeRole"
         }]
     }'
-    
-    # Create role
-    EKS_SERVICE_ROLE_ARN=$(echo "$trust_policy" | aws iam create-role \
-        --role-name "$role_name" \
-        --assume-role-policy-document file:///dev/stdin \
-        --query 'Role.Arn' \
-        --output text)
-    
-    # Attach required policies
-    aws iam attach-role-policy \
-        --role-name "$role_name" \
-        --policy-arn "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"
-    
-    aws iam attach-role-policy \
-        --role-name "$role_name" \
-        --policy-arn "arn:aws:iam::aws:policy/AmazonEKSVPCResourceController"
-    
+    EKS_SERVICE_ROLE_ARN=$(echo "$trust_policy" | aws iam create-role --role-name "$role_name" --assume-role-policy-document file:///dev/stdin --query 'Role.Arn' --output text)
+
+    aws iam attach-role-policy --role-name "$role_name" --policy-arn "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"
+    aws iam attach-role-policy --role-name "$role_name" --policy-arn "arn:aws:iam::aws:policy/AmazonEKSVPCResourceController"
     success "EKS service role created: $EKS_SERVICE_ROLE_ARN"
     save_state
 }
 
-create_node_role() {
+function create_node_role() {
     section "CREATING NODE INSTANCE ROLE"
-    
     local role_name="${PROJECT_NAME}-${ENVIRONMENT}-eks-node-role"
-    
-    # Check if role already exists
     if aws iam get-role --role-name "$role_name" &>/dev/null; then
         log "IAM role already exists: $role_name"
         NODE_INSTANCE_ROLE_ARN=$(aws iam get-role --role-name "$role_name" --query 'Role.Arn' --output text)
         log "Role ARN: $NODE_INSTANCE_ROLE_ARN"
         return 0
-    fi
-    
+    fi    
     log "Creating EKS node role: $role_name"
-    
-    # Trust policy for EC2
+
     local trust_policy='{
         "Version": "2012-10-17",
         "Statement": [{
@@ -190,41 +129,21 @@ create_node_role() {
             "Action": "sts:AssumeRole"
         }]
     }'
-    
-    # Create role
-    NODE_INSTANCE_ROLE_ARN=$(echo "$trust_policy" | aws iam create-role \
-        --role-name "$role_name" \
-        --assume-role-policy-document file:///dev/stdin \
-        --query 'Role.Arn' \
-        --output text)
+
+    NODE_INSTANCE_ROLE_ARN=$(echo "$trust_policy" | aws iam create-role --role-name "$role_name" --assume-role-policy-document file:///dev/stdin --query 'Role.Arn' --output text)
     
     # Attach required policies
-    aws iam attach-role-policy \
-        --role-name "$role_name" \
-        --policy-arn "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy"
-    
-    aws iam attach-role-policy \
-        --role-name "$role_name" \
-        --policy-arn "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
-    
-    aws iam attach-role-policy \
-        --role-name "$role_name" \
-        --policy-arn "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
-    
+    aws iam attach-role-policy --role-name "$role_name" --policy-arn "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy"
+    aws iam attach-role-policy --role-name "$role_name" --policy-arn "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
+    aws iam attach-role-policy --role-name "$role_name" --policy-arn "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
     success "Node instance role created: $NODE_INSTANCE_ROLE_ARN"
     save_state
 }
 
-################################################################################
-# CREATE EKS CLUSTER
-################################################################################
-
-create_eks_cluster() {
-    section "CREATING EKS CLUSTER"
-    
+function create_eks_cluster() {
+    section "CREATING EKS CLUSTER"    
     EKS_CLUSTER_NAME="${PROJECT_NAME}-${ENVIRONMENT}-cluster"
-    
-    # Check if cluster already exists
+
     if aws eks describe-cluster --name "$EKS_CLUSTER_NAME" --region "$AWS_REGION" &>/dev/null; then
         warning "EKS cluster already exists: $EKS_CLUSTER_NAME"
         echo -n "Do you want to use the existing cluster? (yes/no): "
@@ -238,36 +157,18 @@ create_eks_cluster() {
             error "Please use a different cluster name or delete the existing cluster"
             exit 1
         fi
-    fi
-    
+    fi   
     log "Creating EKS cluster: $EKS_CLUSTER_NAME"
     log "This may take 10-15 minutes..."
-    
-    # Convert subnet IDs to array
+
     IFS=' ' read -ra SUBNET_ARRAY <<< "$PRIVATE_SUBNET_IDS"
-    
-    # Create cluster
-    aws eks create-cluster \
-        --name "$EKS_CLUSTER_NAME" \
-        --region "$AWS_REGION" \
-        --role-arn "$EKS_SERVICE_ROLE_ARN" \
-        --resources-vpc-config subnetIds="${SUBNET_ARRAY[0]}","${SUBNET_ARRAY[1]}" \
-        --kubernetes-version "$EKS_VERSION" \
-        --tags "Name=${EKS_CLUSTER_NAME},Project=${PROJECT_NAME},Environment=${ENVIRONMENT}" &>/dev/null
-    
+
+    aws eks create-cluster --name "$EKS_CLUSTER_NAME" --region "$AWS_REGION" --role-arn "$EKS_SERVICE_ROLE_ARN" --resources-vpc-config subnetIds="${SUBNET_ARRAY[0]}","${SUBNET_ARRAY[1]}" --kubernetes-version "$EKS_VERSION" --tags "Name=${EKS_CLUSTER_NAME},Project=${PROJECT_NAME},Environment=${ENVIRONMENT}" &>/dev/null    
     success "EKS cluster creation initiated"
-    
-    # Wait for cluster to become active
+
     log "Waiting for cluster to become active..."
-    aws eks wait cluster-active \
-        --name "$EKS_CLUSTER_NAME" \
-        --region "$AWS_REGION"
-    
-    # Get cluster details
-    local cluster_info=$(aws eks describe-cluster \
-        --name "$EKS_CLUSTER_NAME" \
-        --region "$AWS_REGION" \
-        --output json)
+    aws eks wait cluster-active --name "$EKS_CLUSTER_NAME" --region "$AWS_REGION"
+    local cluster_info=$(aws eks describe-cluster --name "$EKS_CLUSTER_NAME" --region "$AWS_REGION" --output json)
     
     EKS_CLUSTER_ARN=$(echo "$cluster_info" | jq -r '.cluster.arn')
     EKS_CLUSTER_ENDPOINT=$(echo "$cluster_info" | jq -r '.cluster.endpoint')
@@ -279,78 +180,43 @@ create_eks_cluster() {
     save_state
 }
 
-load_existing_cluster() {
+function load_existing_cluster() {
     log "Loading existing EKS cluster configuration..."
-    
-    local cluster_info=$(aws eks describe-cluster \
-        --name "$EKS_CLUSTER_NAME" \
-        --region "$AWS_REGION" \
-        --output json)
-    
+    local cluster_info=$(aws eks describe-cluster --name "$EKS_CLUSTER_NAME" --region "$AWS_REGION" --output json)
+
     EKS_CLUSTER_ARN=$(echo "$cluster_info" | jq -r '.cluster.arn')
     EKS_CLUSTER_ENDPOINT=$(echo "$cluster_info" | jq -r '.cluster.endpoint')
-    
     log "Cluster ARN: $EKS_CLUSTER_ARN"
     log "Cluster Endpoint: $EKS_CLUSTER_ENDPOINT"
-    
     save_state
     success "Loaded existing EKS cluster configuration"
 }
 
-################################################################################
-# CREATE NODE GROUP
-################################################################################
-
-create_node_group() {
+function create_node_group() {
     section "CREATING MANAGED NODE GROUP"
     
     NODE_GROUP_NAME="${PROJECT_NAME}-${ENVIRONMENT}-nodegroup"
-    
-    # Check if node group already exists
-    if aws eks describe-nodegroup \
-        --cluster-name "$EKS_CLUSTER_NAME" \
-        --nodegroup-name "$NODE_GROUP_NAME" \
-        --region "$AWS_REGION" &>/dev/null; then
+
+    if aws eks describe-nodegroup --cluster-name "$EKS_CLUSTER_NAME" --nodegroup-name "$NODE_GROUP_NAME" --region "$AWS_REGION" &>/dev/null; then
         log "Node group already exists: $NODE_GROUP_NAME"
         return 0
     fi
     
     log "Creating managed node group: $NODE_GROUP_NAME"
     log "This may take 5-10 minutes..."
-    
-    # Convert subnet IDs to array
     IFS=' ' read -ra SUBNET_ARRAY <<< "$PRIVATE_SUBNET_IDS"
-    
-    # Create node group
-    aws eks create-nodegroup \
-        --cluster-name "$EKS_CLUSTER_NAME" \
-        --nodegroup-name "$NODE_GROUP_NAME" \
-        --region "$AWS_REGION" \
-        --subnets "${SUBNET_ARRAY[0]}" "${SUBNET_ARRAY[1]}" \
-        --node-role "$NODE_INSTANCE_ROLE_ARN" \
-        --instance-types "$NODE_INSTANCE_TYPE" \
-        --scaling-config minSize="$NODE_MIN_SIZE",maxSize="$NODE_MAX_SIZE",desiredSize="$NODE_DESIRED_SIZE" \
-        --disk-size "$NODE_DISK_SIZE" \
-        --tags "Name=${NODE_GROUP_NAME},Project=${PROJECT_NAME},Environment=${ENVIRONMENT}" &>/dev/null
-    
+    aws eks create-nodegroup --cluster-name "$EKS_CLUSTER_NAME" --nodegroup-name "$NODE_GROUP_NAME" --region "$AWS_REGION" --subnets "${SUBNET_ARRAY[0]}" "${SUBNET_ARRAY[1]}" --node-role "$NODE_INSTANCE_ROLE_ARN" --instance-types "$NODE_INSTANCE_TYPE" --scaling-config minSize="$NODE_MIN_SIZE",maxSize="$NODE_MAX_SIZE",desiredSize="$NODE_DESIRED_SIZE" --disk-size "$NODE_DISK_SIZE" --tags "Name=${NODE_GROUP_NAME},Project=${PROJECT_NAME},Environment=${ENVIRONMENT}" &>/dev/null    
     success "Node group creation initiated"
-    
-    # Wait for node group to become active
+
     log "Waiting for node group to become active..."
-    aws eks wait nodegroup-active \
-        --cluster-name "$EKS_CLUSTER_NAME" \
-        --nodegroup-name "$NODE_GROUP_NAME" \
-        --region "$AWS_REGION"
+    aws eks wait nodegroup-active --cluster-name "$EKS_CLUSTER_NAME" --nodegroup-name "$NODE_GROUP_NAME" --region "$AWS_REGION"
     
     success "Node group is now active"
     save_state
 }
 
-################################################################################
-# SUMMARY
-################################################################################
 
-print_summary() {
+function print_summary() {
     section "EKS CLUSTER CREATION SUMMARY"
     
     echo ""
@@ -405,11 +271,7 @@ EOF
     success "Export file created: eks-exports.sh"
 }
 
-################################################################################
-# MAIN EXECUTION
-################################################################################
-
-main() {
+function main() {
     LOG_FILE="aws-eks-provision-$(date +%Y%m%d%H%M%S).log"
     
     log "Starting EKS cluster creation process..."

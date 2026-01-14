@@ -1,16 +1,8 @@
 #!/usr/bin/env bash
 
-################################################################################
-# S3 Bucket Creation Module - Production Grade
-# Creates S3 buckets with versioning, encryption, lifecycle policies
-# Version: 2.0
-################################################################################
-
 set -euo pipefail
 
 source utilities.sh
-
-# Source variables if not already loaded
 if [[ -z "${PROJECT_NAME:-}" ]]; then
     if [[ -f "variables.sh" ]]; then
         source variables.sh
@@ -23,31 +15,12 @@ fi
 
 # State file for unified cloud state
 STATE_FILE="cloud-state-${PROJECT_NAME}-${ENVIRONMENT}.json"
-
-################################################################################
-# COLOR CODES
-################################################################################
-
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-MAGENTA='\033[0;35m'
-NC='\033[0m'
-
-################################################################################
-# STATE MANAGEMENT
-################################################################################
-
-save_state() {
-    # Read existing state or create new
+function save_state() {
     local existing_state="{}"
     if [[ -f "$STATE_FILE" ]]; then
         existing_state=$(cat "$STATE_FILE")
     fi
-    
-    # Update S3 section in state
+
     cat > "$STATE_FILE" <<EOF
 {
   "project": "${PROJECT_NAME}",
@@ -69,39 +42,15 @@ EOF
     log "State saved to $STATE_FILE"
 }
 
-cleanup_on_error() {
+function cleanup_on_error() {
     error "An error occurred during S3 creation. Initiating rollback..."
     
     if [[ -n "$S3_BUCKET_NAME" ]]; then
         warning "Attempting to delete bucket: $S3_BUCKET_NAME"
-        
-        # Remove all objects and versions first
         aws s3 rm "s3://${S3_BUCKET_NAME}" --recursive --region "$AWS_REGION" 2>/dev/null || true
-        
-        # Delete all object versions if versioning is enabled
-        aws s3api delete-objects \
-            --bucket "$S3_BUCKET_NAME" \
-            --delete "$(aws s3api list-object-versions \
-                --bucket "$S3_BUCKET_NAME" \
-                --output json \
-                --query '{Objects: Versions[].{Key:Key,VersionId:VersionId}}' \
-                2>/dev/null || echo '{}')" \
-            --region "$AWS_REGION" 2>/dev/null || true
-        
-        # Delete delete markers
-        aws s3api delete-objects \
-            --bucket "$S3_BUCKET_NAME" \
-            --delete "$(aws s3api list-object-versions \
-                --bucket "$S3_BUCKET_NAME" \
-                --output json \
-                --query '{Objects: DeleteMarkers[].{Key:Key,VersionId:VersionId}}' \
-                2>/dev/null || echo '{}')" \
-            --region "$AWS_REGION" 2>/dev/null || true
-        
-        # Delete the bucket
-        aws s3api delete-bucket \
-            --bucket "$S3_BUCKET_NAME" \
-            --region "$AWS_REGION" 2>/dev/null || true
+        aws s3api delete-objects --bucket "$S3_BUCKET_NAME" --delete "$(aws s3api list-object-versions --bucket "$S3_BUCKET_NAME" --output json --query '{Objects: Versions[].{Key:Key,VersionId:VersionId}}' 2>/dev/null || echo '{}')" --region "$AWS_REGION" 2>/dev/null || true
+        aws s3api delete-objects --bucket "$S3_BUCKET_NAME" --delete "$(aws s3api list-object-versions --bucket "$S3_BUCKET_NAME" --output json --query '{Objects: DeleteMarkers[].{Key:Key,VersionId:VersionId}}' 2>/dev/null || echo '{}')" --region "$AWS_REGION" 2>/dev/null || true
+        aws s3api delete-bucket --bucket "$S3_BUCKET_NAME" --region "$AWS_REGION" 2>/dev/null || true
         
         success "Bucket deleted: $S3_BUCKET_NAME"
     fi
@@ -112,11 +61,8 @@ cleanup_on_error() {
 
 trap cleanup_on_error ERR
 
-################################################################################
-# PREREQUISITE CHECKS
-################################################################################
 
-check_prerequisites() {
+function check_prerequisites() {
     section "CHECKING PREREQUISITES"
     
     # Check AWS CLI
@@ -154,11 +100,8 @@ check_prerequisites() {
     success "Configuration validation passed"
 }
 
-################################################################################
-# CHECK EXISTING BUCKET
-################################################################################
 
-check_existing_bucket() {
+function check_existing_bucket() {
     section "CHECKING FOR EXISTING S3 BUCKET"
     
     local bucket_name="${PROJECT_NAME}-${ENVIRONMENT}-${S3_BUCKET_PURPOSE}-${AWS_ACCOUNT_ID}"
@@ -172,8 +115,7 @@ check_existing_bucket() {
             log "Using existing S3 bucket: $bucket_name"
             S3_BUCKET_NAME="$bucket_name"
             S3_BUCKET_ARN="arn:aws:s3:::${bucket_name}"
-            
-            # Get bucket details
+
             load_existing_bucket
             return 0
         else
@@ -186,15 +128,9 @@ check_existing_bucket() {
     fi
 }
 
-load_existing_bucket() {
+function load_existing_bucket() {
     log "Loading existing S3 bucket configuration..."
-    
-    # Check versioning status
-    local versioning_status=$(aws s3api get-bucket-versioning \
-        --bucket "$S3_BUCKET_NAME" \
-        --region "$AWS_REGION" \
-        --query 'Status' \
-        --output text 2>/dev/null || echo "None")
+    local versioning_status=$(aws s3api get-bucket-versioning --bucket "$S3_BUCKET_NAME" --region "$AWS_REGION" --query 'Status' --output text 2>/dev/null || echo "None")
     
     if [[ "$versioning_status" == "Enabled" ]]; then
         log "Versioning is enabled"
@@ -203,17 +139,11 @@ load_existing_bucket() {
     fi
     
     # Check encryption
-    local encryption_status=$(aws s3api get-bucket-encryption \
-        --bucket "$S3_BUCKET_NAME" \
-        --region "$AWS_REGION" 2>/dev/null && echo "Enabled" || echo "Disabled")
+    local encryption_status=$(aws s3api get-bucket-encryption --bucket "$S3_BUCKET_NAME" --region "$AWS_REGION" 2>/dev/null && echo "Enabled" || echo "Disabled")
     
     if [[ "$encryption_status" == "Enabled" ]]; then
         log "Encryption is enabled"
-        S3_KMS_KEY_ID=$(aws s3api get-bucket-encryption \
-            --bucket "$S3_BUCKET_NAME" \
-            --region "$AWS_REGION" \
-            --query 'ServerSideEncryptionConfiguration.Rules[0].ApplyServerSideEncryptionByDefault.KMSMasterKeyID' \
-            --output text 2>/dev/null || echo "AES256")
+        S3_KMS_KEY_ID=$(aws s3api get-bucket-encryption --bucket "$S3_BUCKET_NAME" --region "$AWS_REGION" --query 'ServerSideEncryptionConfiguration.Rules[0].ApplyServerSideEncryptionByDefault.KMSMasterKeyID' --output text 2>/dev/null || echo "AES256")
     else
         warning "Encryption is not enabled"
         S3_KMS_KEY_ID=""
@@ -223,10 +153,6 @@ load_existing_bucket() {
     success "Loaded existing S3 bucket configuration"
 }
 
-################################################################################
-# CREATE S3 BUCKET
-################################################################################
-
 create_s3_bucket() {
     section "CREATING S3 BUCKET"
     
@@ -234,16 +160,10 @@ create_s3_bucket() {
     
     log "Creating S3 bucket: $S3_BUCKET_NAME"
     
-    # Create bucket with location constraint if not in us-east-1
     if [[ "$AWS_REGION" == "us-east-1" ]]; then
-        aws s3api create-bucket \
-            --bucket "$S3_BUCKET_NAME" \
-            --region "$AWS_REGION"
+        aws s3api create-bucket --bucket "$S3_BUCKET_NAME" --region "$AWS_REGION"
     else
-        aws s3api create-bucket \
-            --bucket "$S3_BUCKET_NAME" \
-            --region "$AWS_REGION" \
-            --create-bucket-configuration LocationConstraint="$AWS_REGION"
+        aws s3api create-bucket --bucket "$S3_BUCKET_NAME" --region "$AWS_REGION" --create-bucket-configuration LocationConstraint="$AWS_REGION"
     fi
     
     S3_BUCKET_ARN="arn:aws:s3:::${S3_BUCKET_NAME}"
@@ -251,9 +171,7 @@ create_s3_bucket() {
     
     # Add tags
     log "Adding tags to bucket..."
-    aws s3api put-bucket-tagging \
-        --bucket "$S3_BUCKET_NAME" \
-        --region "$AWS_REGION" \
+    aws s3api put-bucket-tagging --bucket "$S3_BUCKET_NAME" --region "$AWS_REGION" \
         --tagging "TagSet=[
             {Key=Name,Value=${S3_BUCKET_NAME}},
             {Key=Project,Value=${PROJECT_NAME}},
@@ -267,19 +185,13 @@ create_s3_bucket() {
     save_state
 }
 
-################################################################################
-# CONFIGURE BUCKET VERSIONING
-################################################################################
 
-configure_versioning() {
+function configure_versioning() {
     if [[ "$S3_VERSIONING_ENABLED" == "true" ]]; then
         section "CONFIGURING BUCKET VERSIONING"
         
         log "Enabling versioning on bucket: $S3_BUCKET_NAME"
-        aws s3api put-bucket-versioning \
-            --bucket "$S3_BUCKET_NAME" \
-            --region "$AWS_REGION" \
-            --versioning-configuration Status=Enabled
+        aws s3api put-bucket-versioning --bucket "$S3_BUCKET_NAME" --region "$AWS_REGION" --versioning-configuration Status=Enabled
         
         success "Versioning enabled on bucket"
         save_state
@@ -288,19 +200,13 @@ configure_versioning() {
     fi
 }
 
-################################################################################
-# CONFIGURE BUCKET ENCRYPTION
-################################################################################
 
-configure_encryption() {
+function configure_encryption() {
     if [[ "$S3_ENCRYPTION_ENABLED" == "true" ]]; then
         section "CONFIGURING BUCKET ENCRYPTION"
         
         log "Enabling server-side encryption on bucket: $S3_BUCKET_NAME"
-        aws s3api put-bucket-encryption \
-            --bucket "$S3_BUCKET_NAME" \
-            --region "$AWS_REGION" \
-            --server-side-encryption-configuration '{
+        aws s3api put-bucket-encryption --bucket "$S3_BUCKET_NAME" --region "$AWS_REGION" --server-side-encryption-configuration '{
                 "Rules": [{
                     "ApplyServerSideEncryptionByDefault": {
                         "SSEAlgorithm": "AES256"
@@ -317,20 +223,12 @@ configure_encryption() {
     fi
 }
 
-################################################################################
-# CONFIGURE PUBLIC ACCESS BLOCK
-################################################################################
-
-configure_public_access_block() {
+function configure_public_access_block() {
     if [[ "$S3_BLOCK_PUBLIC_ACCESS" == "true" ]]; then
         section "CONFIGURING PUBLIC ACCESS BLOCK"
         
         log "Blocking all public access to bucket: $S3_BUCKET_NAME"
-        aws s3api put-public-access-block \
-            --bucket "$S3_BUCKET_NAME" \
-            --region "$AWS_REGION" \
-            --public-access-block-configuration \
-                "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true"
+        aws s3api put-public-access-block --bucket "$S3_BUCKET_NAME" --region "$AWS_REGION" --public-access-block-configuration "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true"
         
         success "Public access blocked on bucket"
         save_state
@@ -339,11 +237,8 @@ configure_public_access_block() {
     fi
 }
 
-################################################################################
-# CONFIGURE LIFECYCLE POLICY
-################################################################################
 
-configure_lifecycle_policy() {
+function configure_lifecycle_policy() {
     section "CONFIGURING LIFECYCLE POLICY"
     
     log "Setting lifecycle policy for bucket: $S3_BUCKET_NAME"
@@ -379,20 +274,14 @@ configure_lifecycle_policy() {
         ]
     }'
     
-    echo "$lifecycle_policy" | aws s3api put-bucket-lifecycle-configuration \
-        --bucket "$S3_BUCKET_NAME" \
-        --region "$AWS_REGION" \
-        --lifecycle-configuration file:///dev/stdin
+    echo "$lifecycle_policy" | aws s3api put-bucket-lifecycle-configuration --bucket "$S3_BUCKET_NAME" --region "$AWS_REGION" --lifecycle-configuration file:///dev/stdin
     
     success "Lifecycle policy configured"
     save_state
 }
 
-################################################################################
-# SUMMARY
-################################################################################
 
-print_summary() {
+function print_summary() {
     section "S3 BUCKET CREATION SUMMARY"
     
     echo ""
@@ -423,8 +312,7 @@ print_summary() {
     echo ""
     echo -e "${CYAN}═══════════════════════════════════════════════════════════${NC}"
     echo ""
-    
-    # Export variables for use by other scripts
+
     cat > "s3-exports.sh" <<EOF
 #!/bin/bash
 # S3 Exports - Source this file to use S3 resources in other scripts
@@ -437,11 +325,7 @@ EOF
     success "Export file created: s3-exports.sh"
 }
 
-################################################################################
-# MAIN EXECUTION
-################################################################################
-
-main() {
+function main() {
     LOG_FILE="aws-s3-provision-$(date +%Y%m%d%H%M%S).log"
     
     log "Starting S3 bucket creation process..."
@@ -454,7 +338,7 @@ main() {
         create_s3_bucket
     fi
     
-    # Always configure/verify settings (for both new and existing buckets)
+
     configure_versioning
     configure_encryption
     configure_public_access_block
@@ -466,5 +350,5 @@ main() {
     log "You can now use the S3 bucket: $S3_BUCKET_NAME"
 }
 
-# Execute main function
+
 main
